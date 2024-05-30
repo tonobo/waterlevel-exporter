@@ -1,6 +1,7 @@
 require 'typhoeus'
 require 'logger'
 require 'ox'
+require 'pmap'
 
 LOGGER = Logger.new(STDERR)
 
@@ -25,13 +26,13 @@ app = Rack::Builder.new do
   map '/metrics' do
     block = lambda do |env|
       status = 200
-      metrics = []
-      FEEDS.each do |station, link|
-        response = Typhoeus.get(link)
+      all_metrics = FEEDS.pmap do |station, link|
+        metrics = []
+        response = Typhoeus.get(link, timeout: 5)
         unless response.success?
           metrics << METRIC.call('error_count', $error_count += 1, station: station, type: :counter)
           LOGGER.error "[#{station}] Failed fetching feed data: #{response.inspect}"
-          next
+          next []
         end
         Ox.load(response.body).locate('*/item[0]').each do
           date = _1.locate('*/pubDate')&.first&.nodes&.first
@@ -40,15 +41,16 @@ app = Rack::Builder.new do
           metrics << METRIC.call('watermark_meters', desc[/Wasserstand: (\d+) cm/,1].to_f / 100, station: station)
           metrics << METRIC.call('flow_cubic_meters', desc[/Durchfluss: ([\d,]+)/, 1]&.tr(',', '.').to_f, station: station)
         end
+        metrics
       rescue StandardError => err
         metrics << METRIC.call('error_count', $error_count += 1, station: station, type: :counter)
         LOGGER.error "[#{station}] Unkown error occured: #{err} #{response.inspect}\n#{err.backtrace.join("\n")}"
-        next
+        next []
       end
       [
         status,
         { 'content-type' => 'text/plain' },
-        StringIO.new(metrics.join)
+        StringIO.new(all_metrics.flatten.join)
       ]
     end
     run block
